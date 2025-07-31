@@ -113,7 +113,7 @@ func (s *StoreBase[Store, StoreTx]) applyMigrations(migrations []Migration) erro
 			err = tx.QueryRow("SELECT version FROM migration LIMIT 1").Scan(&version)
 			if err != nil {
 				if errors.Is(err, sql.ErrNoRows) {
-					version = 1
+					version = 0
 					_, err = tx.Exec("INSERT INTO migration (version) VALUES (?)", version)
 					if err != nil {
 						return s.DBErr(err, "updating version")
