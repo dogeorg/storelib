@@ -18,8 +18,8 @@ var ErrConflict = errors.New("db-conflict")
 
 // StoreBase must be included in your Store imeplentation struct
 type StoreBase[Store any, StoreTx any] struct {
-	TX         Queryable // Query the DB inside/outside a Transaction
-	RawDB      *sql.DB   // Bypass TX and directly access the DB
+	Txn        Queryable // Query the DB inside/outside a Transaction
+	RawDB      *sql.DB   // Bypass Txn and directly access the DB
 	Ctx        context.Context
 	isPostgres bool
 	impl       StoreImpl[Store, StoreTx]
@@ -38,7 +38,7 @@ var _ StoreAPI[any, any] = &StoreBase[any, any]{} // interface assertion
 type StoreAPI[Store any, StoreTx any] interface {
 
 	// Transact performs a transactional update function
-	Transact(fn func(tx StoreTx) error) error
+	Transact(fn func(txn StoreTx) error) error
 
 	// WithCtx returns the same Store interface, bound to a specific cancellable Context
 	WithCtx(ctx context.Context) Store
@@ -49,8 +49,10 @@ type StoreAPI[Store any, StoreTx any] interface {
 
 // The common read-only parts of sql.DB and sql.Tx interfaces
 type Queryable interface {
+	Exec(query string, args ...any) (sql.Result, error)
 	Query(query string, args ...any) (*sql.Rows, error)
 	QueryRow(query string, args ...any) *sql.Row
+	Prepare(query string) (*sql.Stmt, error)
 }
 
 const VERSION_SCHEMA string = `
@@ -83,7 +85,7 @@ func InitStore[Store any, StoreTx any](impl StoreImpl[Store, StoreTx], base *Sto
 		return base.DBErr(err, "opening database")
 	}
 	base.RawDB = db
-	base.TX = db // initial `tx` is the database itself.
+	base.Txn = db // initial `tx` is the database itself.
 	base.Ctx = ctx
 	base.impl = impl
 	if backend == "sqlite3" {
@@ -174,7 +176,7 @@ func (s *StoreBase[Store, StoreTx]) WithCtx(ctx context.Context) Store {
 	}
 	// copy our base fields, changing 'ctx' and 'impl'
 	base.RawDB = s.RawDB
-	base.TX = s.TX
+	base.Txn = s.Txn
 	base.Ctx = ctx
 	base.isPostgres = s.isPostgres
 	base.impl = impl
@@ -190,7 +192,7 @@ func (s *StoreBase[Store, StoreTx]) Transact(fn func(tx StoreTx) error) error {
 		}
 		// copy our base fields, changing 'tx' and 'impl'
 		base.RawDB = s.RawDB
-		base.TX = tx
+		base.Txn = tx
 		base.Ctx = s.Ctx
 		base.isPostgres = s.isPostgres
 		base.impl = impl
