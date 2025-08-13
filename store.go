@@ -98,35 +98,30 @@ func InitStore[Store any, StoreTx any](impl StoreImpl[Store, StoreTx], base *Sto
 }
 
 func (s *StoreBase[Store, StoreTx]) applyMigrations(migrations []Migration) error {
+	// this part cannot be inside a transaction,
+	// because on Postgres any error aborts the transaction.
 	var version int
-	err := s.doTxn("version schema", func(tx *sql.Tx) error {
-		// apply migrations
-		verRow := tx.QueryRow("SELECT version FROM migration LIMIT 1")
-		err := verRow.Scan(&version)
+	verRow := s.RawDB.QueryRow("SELECT version FROM migration LIMIT 1")
+	err := verRow.Scan(&version)
+	if err != nil {
+		// first-time database init (idempotent)
+		_, err := s.RawDB.Exec(VERSION_SCHEMA)
 		if err != nil {
-			// first-time database init (idempotent)
-			_, err := tx.Exec(VERSION_SCHEMA)
-			if err != nil {
-				return s.DBErr(err, "creating database schema")
-			}
-			// set up version table (idempotent)
-			err = tx.QueryRow("SELECT version FROM migration LIMIT 1").Scan(&version)
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					version = 0
-					_, err = tx.Exec("INSERT INTO migration (version) VALUES (?)", version)
-					if err != nil {
-						return s.DBErr(err, "updating version")
-					}
-				} else {
-					return s.DBErr(err, "querying version")
+			return s.DBErr(err, "creating database schema")
+		}
+		// set up version table (idempotent)
+		err = s.RawDB.QueryRow("SELECT version FROM migration LIMIT 1").Scan(&version)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				version = 0
+				_, err = s.RawDB.Exec("INSERT INTO migration (version) VALUES ($1)", version)
+				if err != nil {
+					return s.DBErr(err, "updating version")
 				}
+			} else {
+				return s.DBErr(err, "querying version")
 			}
 		}
-		return nil
-	})
-	if err != nil {
-		return err
 	}
 	priorVer := -1
 	for _, m := range migrations {
@@ -138,11 +133,19 @@ func (s *StoreBase[Store, StoreTx]) applyMigrations(migrations []Migration) erro
 		if version < m.Version {
 			name := fmt.Sprintf("migration %v", m.Version)
 			err = s.doTxn(name, func(tx *sql.Tx) error {
-				_, err = tx.Exec(m.SQL)
+				sql := m.SQL
+				if !s.isPostgres {
+					// Convert a Postgres Schema to Sqlite:
+					sql = strings.ReplaceAll(sql, "BIGSERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
+					sql = strings.ReplaceAll(sql, "SERIAL PRIMARY KEY", "INTEGER PRIMARY KEY AUTOINCREMENT")
+					sql = strings.ReplaceAll(sql, "TIMESTAMP WITH TIME ZONE", "DATETIME")
+					sql = strings.ReplaceAll(sql, " USING HASH", "") // HASH index
+				}
+				_, err = tx.Exec(sql)
 				if err != nil {
 					return s.DBErr(err, fmt.Sprintf("applying migration %v", m.Version))
 				}
-				_, err = tx.Exec("UPDATE migration SET version=?", version)
+				_, err = tx.Exec("UPDATE migration SET version=$1", m.Version)
 				if err != nil {
 					return s.DBErr(err, "updating version")
 				}
